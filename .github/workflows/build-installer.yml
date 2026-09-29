@@ -1,0 +1,59 @@
+name: Build installer (DMG)
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the project folder
+        id: root
+        run: |
+          SCRIPT=$(find . -path '*scripts/build-installer.sh' -not -path './.git/*' | head -1)
+          if [ -z "$SCRIPT" ]; then echo "❌ Couldn't find scripts/build-installer.sh — were all files uploaded?"; exit 1; fi
+          ROOT=$(cd "$(dirname "$SCRIPT")/.." && pwd)
+          echo "Project folder: $ROOT"
+          echo "dir=$ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Use the newest Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -z "$XC" ]; then XC=$(ls -d /Applications/Xcode*.app | sort -V | tail -1); fi
+          echo "Using $XC"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Pick version
+        id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT";
+          else echo "version=1.1.0" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Build DMG
+        working-directory: ${{ steps.root.outputs.dir }}
+        run: |
+          chmod +x scripts/build-installer.sh "installer/Install Notchling.command"
+          ./scripts/build-installer.sh "${{ steps.v.outputs.version }}"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Notchling-${{ steps.v.outputs.version }}
+          path: ${{ steps.root.outputs.dir }}/dist/*.dmg
+
+      - name: Attach to the GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.root.outputs.dir }}/dist/*.dmg
