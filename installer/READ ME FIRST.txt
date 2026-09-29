@@ -1,0 +1,40 @@
+🌱 NOTCHLING — a tiny pet that lives in your Mac's notch and answers your questions
+
+INSTALL (pick one)
+
+  Easiest: double-click "Install Notchling.command".
+     If macOS says it can't verify the developer: open System Settings → Privacy & Security,
+     scroll down, click "Open Anyway", then double-click it again.
+
+  Or: drag Notchling onto the Applications folder, then open it from Applications.
+     If macOS blocks it: System Settings → Privacy & Security → "Open Anyway" (only needed once).
+
+  Terminal fans: after dragging to Applications, run
+     xattr -dr com.apple.quarantine /Applications/Notchling.app
+
+(This happens because Notchling is a free hobby app that isn't registered with Apple.)
+
+FIRST LAUNCH (it's free!)
+  1. Settings open automatically if your pet needs a "brain":
+     - Mac on macOS 26 (Tahoe) with Apple Intelligence turned on? Nothing to do. It uses Apple's
+       free on-device AI.
+     - Otherwise get a FREE Google Gemini key: go to aistudio.google.com/apikey, sign in with any
+       Google account, click "Create API key", and paste it into Settings. No credit card needed.
+       (Don't add billing to it if you want it to stay free. The free tier has a daily limit.)
+     Web searches use DuckDuckGo + Wikipedia, which are free too.
+     Optional: you can switch to Claude with a paid Anthropic key for smarter searching.
+  2. Look at the top-middle of your screen. Hover the notch to peek, click to open.
+  3. Your egg hatches in under a minute (warming it helps!).
+
+CARE
+  🍙 Meal  🍪 Snack  🛁 Bath (also cleans up poop)  🤚 Pat (or stroke it with the cursor)
+  🌙 Bedtime  💊 Medicine when it's sick. Click it to poke — three quick clicks makes it dizzy.
+  It grows up over a week: Baby → Kid → Teen → Grown-up. Neglect it too long and it runs away!
+  Time passes slower while your Mac is off, so a weekend away won't hurt it.
+
+ASK
+  Open the 💬 Ask tab and type any question — it searches the web for free when needed and shows sources.
+  Drag a PDF, image (Gemini/Claude only) or text file onto the notch to feed it to your pet, then ask about it.
+
+Needs macOS 14 (Sonoma) or newer. Works on Macs without a notch too (it sits at the top-middle).
+Quit from the 🌿 leaf icon in the menu bar.

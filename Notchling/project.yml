@@ -1,0 +1,53 @@
+name: Notchling
+options:
+  bundleIdPrefix: app.notchling
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    # Ad-hoc signing: free, works for sharing with friends (no Apple Developer account needed).
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: NO
+
+targets:
+  Notchling:
+    type: application
+    platform: macOS
+    scheme: {}
+    sources:
+      - path: Sources
+      - path: Assets.xcassets
+        buildPhase: resources
+      - path: Resources/sounds
+        type: folder
+        buildPhase: resources
+    info:
+      path: Resources/Info.plist
+      properties:
+        CFBundleName: Notchling
+        CFBundleDisplayName: Notchling
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundlePackageType: APPL
+        CFBundleExecutable: $(EXECUTABLE_NAME)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        LSUIElement: YES
+        LSApplicationCategoryType: public.app-category.entertainment
+        NSHighResolutionCapable: YES
+        NSHumanReadableCopyright: "Notchling — a tiny pet in your notch. Code based on Coucou (MIT)."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.notchling.Notchling
+        PRODUCT_NAME: Notchling
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_APP_SANDBOX: NO
+        GENERATE_INFOPLIST_FILE: NO
