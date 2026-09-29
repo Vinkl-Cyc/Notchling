@@ -58,7 +58,8 @@ enum Pref {
     static let volume = "volume"
 
     static let defaultModel = "claude-haiku-4-5-20251001"
-    static let defaultGeminiModel = "gemini-2.5-flash"
+    static let defaultGeminiModel = "auto"
+    static let geminiWorkingModel = "geminiWorkingModel"
 
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
@@ -368,23 +369,101 @@ final class ChatService: ObservableObject {
         return (answer, Array(sources))
     }
 
+    // MARK: Gemini
+
+    /// Google renames/retires models often, so by default we ask Google which models this key can
+    /// use and pick the newest free "Flash" one, remembering whichever worked last.
+    private func geminiCandidates(key: String) async -> [String] {
+        let defaults = UserDefaults.standard
+        let setting = (defaults.string(forKey: Pref.geminiModel) ?? "auto")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "models/", with: "")
+        var list: [String] = []
+        if !setting.isEmpty && setting.lowercased() != "auto" { list.append(setting) }
+        if let last = defaults.string(forKey: Pref.geminiWorkingModel), !last.isEmpty { list.append(last) }
+        list += await listGeminiModels(key: key)
+        list += ["gemini-flash-latest", "gemini-flash-lite-latest"]
+        var seen = Set<String>()
+        return list.filter { seen.insert($0).inserted }
+    }
+
+    private func listGeminiModels(key: String) async -> [String] {
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200") else { return [] }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 15
+        req.setValue(key, forHTTPHeaderField: "x-goog-api-key")
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let models = json["models"] as? [[String: Any]] else { return [] }
+
+        let banned = ["image", "tts", "audio", "live", "embedding", "native", "exp", "computer",
+                      "robotics", "thinking", "customtools", "learnlm", "veo", "imagen", "gemma", "nano"]
+        struct Cand { let id: String; let version: Double; let lite: Bool; let preview: Bool }
+        var cands: [Cand] = []
+        for m in models {
+            guard let name = m["name"] as? String,
+                  let methods = m["supportedGenerationMethods"] as? [String],
+                  methods.contains("generateContent") else { continue }
+            let id = name.replacingOccurrences(of: "models/", with: "")
+            let low = id.lowercased()
+            guard low.hasPrefix("gemini"), low.contains("flash"),
+                  !banned.contains(where: { low.contains($0) }) else { continue }
+            var version = 0.0
+            if let r = low.range(of: #"gemini-(\d+(\.\d+)?)"#, options: .regularExpression) {
+                version = Double(low[r].replacingOccurrences(of: "gemini-", with: "")) ?? 0
+            }
+            cands.append(Cand(id: id, version: version, lite: low.contains("lite"), preview: low.contains("preview")))
+        }
+        // Stable before preview, newest first, full Flash before Flash-Lite.
+        cands.sort {
+            if $0.preview != $1.preview { return !$0.preview }
+            if $0.version != $1.version { return $0.version > $1.version }
+            if $0.lite != $1.lite { return !$0.lite }
+            return $0.id < $1.id
+        }
+        return cands.map { $0.id }
+    }
+
+    private enum GeminiOutcome { case ok(String), tryNext(String) }
+
     private func askGemini(instructions: String, prompt: String, inline: (Data, String)?) async throws -> String {
         guard let key = geminiKey, !key.isEmpty else { throw brainError(setupHint) }
-        let model = (UserDefaults.standard.string(forKey: Pref.geminiModel) ?? Pref.defaultGeminiModel)
-            .trimmingCharacters(in: .whitespaces)
-        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model.isEmpty ? Pref.defaultGeminiModel : model):generateContent") else {
-            throw brainError("That Gemini model name looks wrong. Check it in Settings ⚙︎")
+        let candidates = await geminiCandidates(key: key)
+        var lastProblem = "No Gemini model is available for this key."
+        for model in candidates.prefix(6) {
+            switch try await geminiRequest(model: model, key: key, instructions: instructions,
+                                           prompt: prompt, inline: inline) {
+            case .ok(let text):
+                UserDefaults.standard.set(model, forKey: Pref.geminiWorkingModel)
+                return text
+            case .tryNext(let why):
+                lastProblem = why
+                if UserDefaults.standard.string(forKey: Pref.geminiWorkingModel) == model {
+                    UserDefaults.standard.removeObject(forKey: Pref.geminiWorkingModel)
+                }
+            }
         }
+        throw brainError(lastProblem)
+    }
 
+    private func geminiRequest(model: String, key: String, instructions: String, prompt: String,
+                               inline: (Data, String)?) async throws -> GeminiOutcome {
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent") else {
+            return .tryNext("That Gemini model name looks wrong. Set Model to auto in Settings ⚙︎")
+        }
         var parts: [[String: Any]] = []
         if let inline = inline {
             parts.append(["inline_data": ["mime_type": inline.1, "data": inline.0.base64EncodedString()]])
         }
         parts.append(["text": prompt])
 
-        var generation: [String: Any] = ["maxOutputTokens": 800, "temperature": 0.6]
+        var generation: [String: Any] = ["temperature": 0.6]
         if model.contains("2.5-flash") {
+            generation["maxOutputTokens"] = 900
             generation["thinkingConfig"] = ["thinkingBudget": 0]  // faster, saves free quota
+        } else {
+            generation["maxOutputTokens"] = 4096  // newer models may "think" first
         }
         let body: [String: Any] = [
             "systemInstruction": ["parts": [["text": instructions]]],
@@ -410,27 +489,30 @@ final class ChatService: ObservableObject {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
             let apiMsg = ((json["error"] as? [String: Any])?["message"] as? String) ?? "Unknown error"
+            let low = apiMsg.lowercased()
+            if status == 401 || (status == 400 && (low.contains("api key") || low.contains("credential"))) {
+                throw brainError("That Gemini key didn't work. Check it in Settings ⚙︎ (\(apiMsg))")
+            }
             switch status {
-            case 400 where apiMsg.lowercased().contains("api key"),
-                 401, 403:
-                throw brainError("That Gemini key didn't work. Check it in Settings ⚙︎")
-            case 429:
-                throw brainError("I've used up today's free thinking quota 😴 Try again later (it resets daily).")
             case 404:
-                throw brainError("Gemini doesn't know the model \"\(model)\". Try gemini-2.5-flash in Settings ⚙︎")
+                return .tryNext("Gemini couldn't find a model to use (\(apiMsg))")
+            case 403, 400:
+                return .tryNext("Gemini said: \(apiMsg)")
+            case 429:
+                return .tryNext("I've used up today's free thinking quota 😴 Try again later (it resets daily).")
             case 500, 503:
-                throw brainError("Gemini is very busy right now. Try again shortly!")
+                return .tryNext("Gemini is very busy right now. Try again shortly!")
             default:
                 throw brainError("Something went wrong (\(status)): \(apiMsg)")
             }
         }
         let candidate = (json["candidates"] as? [[String: Any]])?.first
         let parts2 = (candidate?["content"] as? [String: Any])?["parts"] as? [[String: Any]] ?? []
-        let text = parts2.compactMap { $0["text"] as? String }.joined()
+        let text = parts2.filter { ($0["thought"] as? Bool) != true }.compactMap { $0["text"] as? String }.joined()
         if text.isEmpty, (candidate?["finishReason"] as? String) == "SAFETY" {
             throw brainError("Gemini's safety filter blocked that one. Try rewording it?")
         }
-        return text
+        return .ok(text)
     }
 
     // MARK: Claude (paid, optional) — uses Anthropic's own web search tool

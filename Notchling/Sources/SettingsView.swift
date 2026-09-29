@@ -65,13 +65,16 @@ struct SettingsView: View {
                           save: { chat.setGeminiKey($0) })
                 TextField("Model", text: $geminiModel)
                     .font(.system(.body, design: .monospaced))
+                if let working = UserDefaults.standard.string(forKey: Pref.geminiWorkingModel) {
+                    LabeledContent("Last working model", value: working)
+                }
                 Link("Get a free key at aistudio.google.com →",
                      destination: URL(string: "https://aistudio.google.com/apikey")!)
                     .font(.caption)
             } header: {
                 Text("Google Gemini (free key)")
             } footer: {
-                Text("Free, no credit card: sign in with a Google account and click Create API key. The free tier has a daily limit. Don't add billing if you want it to stay free. Stored only in your Keychain.")
+                Text("Free, no credit card: sign in with a Google account and click Create API key. Leave Model on \"auto\" and Pip picks a free model that works. The free tier has a daily limit. Don't add billing if you want it to stay free. Stored only in your Keychain.")
                     .font(.caption).foregroundColor(.secondary)
             }
 

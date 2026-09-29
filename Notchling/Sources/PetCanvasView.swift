@@ -13,6 +13,8 @@ struct PetSnapshot {
     var mood: Mood
     var reaction: Reaction
     var reactionAge: Double
+    var reactionStart: Double
+    var hover: Bool
     var emoji: String
     var poops: Int
     var hygiene: Double
@@ -31,15 +33,18 @@ struct PetCanvasView: View {
     var size: CGFloat
     var mini: Bool = false
     var animate: Bool = true
+    @State private var motion = PetMotion()
 
     var body: some View {
         GeometryReader { geo in
             let frame = geo.frame(in: .named("panel"))
             TimelineView(.animation(minimumInterval: mini ? 1.0 / 20 : 1.0 / 60, paused: !animate)) { timeline in
                 let snap = snapshot(frame: frame)
+                let m = motion
                 Canvas { ctx, canvasSize in
+                    m.step(snap)
                     PetRenderer.draw(ctx, size: canvasSize,
-                                     t: timeline.date.timeIntervalSinceReferenceDate, s: snap)
+                                     t: timeline.date.timeIntervalSinceReferenceDate, s: snap, m: m)
                 }
             }
         }
@@ -56,10 +61,12 @@ struct PetCanvasView: View {
         var look = CGVector(dx: dx / dist * pull, dy: dy / dist * pull)
         if pet.isThinking { look = CGVector(dx: 0.7, dy: -0.7) }
         let p = pet.pet
+        let hover = frame.insetBy(dx: mini ? -30 : -24, dy: mini ? -30 : -24).contains(m)
         let hatch = (Date().timeIntervalSince(p.born) + p.hatchBonus) / PetStore.hatchSeconds
         return PetSnapshot(
             stage: pet.stage, mood: pet.mood, reaction: pet.reaction,
-            reactionAge: CACurrentMediaTime() - pet.reactionStart, emoji: pet.reactionEmoji,
+            reactionAge: CACurrentMediaTime() - pet.reactionStart, reactionStart: pet.reactionStart,
+            hover: hover, emoji: pet.reactionEmoji,
             poops: p.poops, hygiene: p.hygiene, happiness: p.happiness, asleep: p.isAsleep,
             sick: pet.isSick, thinking: pet.isThinking, expectingFile: pet.expectingFile,
             look: look, hatchProgress: min(1, max(0, hatch)), mini: mini)
@@ -77,25 +84,25 @@ enum PetRenderer {
         var color: Color { Color(red: r, green: g, blue: b) }
     }
 
-    enum EyeStyle { case open, happy, closed, dizzy, annoyed, sad, surprised, sick }
+    enum EyeStyle { case open, happy, closed, dizzy, annoyed, sad, surprised, sick, wink }
     enum MouthStyle { case smile, bigSmile, frown, open, chew, wavy, flat, yawn }
 
-    static func draw(_ base: GraphicsContext, size: CGSize, t: Double, s: PetSnapshot) {
+    static func draw(_ base: GraphicsContext, size: CGSize, t: Double, s: PetSnapshot, m: PetMotion) {
         let S = Double(min(size.width, size.height))
-        let cx = Double(size.width) / 2
+        let cx0 = Double(size.width) / 2
         let ground = Double(size.height) * (s.mini ? 0.94 : 0.88)
         let a = s.reactionAge
 
         if s.stage == .egg {
-            drawEgg(base, S: S, cx: cx, ground: ground, t: t, s: s)
+            drawEgg(base, S: S, cx: cx0, ground: ground, t: t, s: s)
             return
         }
         if s.mood == .gone {
-            drawNote(base, S: S, cx: cx, ground: ground, t: t)
+            drawNote(base, S: S, cx: cx0, ground: ground, t: t)
             return
         }
 
-        // ---- Motion ----
+        // ---- Motion (from PetMotion) ----
         let scale: Double
         switch s.stage {
         case .egg, .baby: scale = 0.74
@@ -104,49 +111,55 @@ enum PetRenderer {
         case .adult: scale = 1.0
         }
         let sc = s.mini ? 1.0 : scale
-        var sy = 1.0 + sin(t * 2.2) * 0.022
-        var hop = 0.0
-        var tilt = 0.0
-        switch s.reaction {
-        case .poke: sy -= 0.2 * exp(-a * 5) * cos(a * 16)
-        case .happy, .pat, .wave, .hatch: hop = abs(sin(a * 7)) * S * 0.07 * max(0, 1 - a / 1.8)
-        case .eat, .snack, .medicine: sy += sin(a * 16) * 0.035
-        case .dizzy: tilt = sin(t * 9) * 0.14
-        case .refuse: tilt = sin(a * 22) * 0.09 * max(0, 1 - a)
-        case .sad: sy -= 0.05
-        case .yawn: sy += sin(min(a, 1.2) / 1.2 * .pi) * 0.08
-        case .bath: tilt = sin(a * 10) * 0.05
-        case .none:
-            if s.asleep { sy = 0.96 + sin(t * 1.2) * 0.03 }
-            else if s.mood == .happy && !s.mini { hop = pow(max(0, sin(t * 2.4)), 10) * S * 0.035 }
-        }
-        let sx = 1 + (1 - sy) * 0.7
-        let w = S * 0.62 * sc * sx
-        let h = S * 0.56 * sc * sy
-        let baseY = ground - hop
+        let w0 = S * 0.62 * sc, h0 = S * 0.56 * sc
+        let w = w0 * m.sx
+        let h = h0 * m.sy
+        let lift = max(0, m.oy) * S
+        let cx = cx0 + m.ox * S
+        let baseY = ground - lift
+        let centerY = baseY - h * 0.5
 
-        // Shadow
+        // Soft contact shadow — shrinks and fades as it hops
         if !s.mini {
-            let sw = w * 0.85 * (1 - hop / S)
-            base.fill(Path(ellipseIn: CGRect(x: cx - sw / 2, y: ground - S * 0.02, width: sw, height: S * 0.045)),
-                      with: .color(.black.opacity(0.28)))
-            drawPoops(base, S: S, cx: cx, ground: ground, w: S * 0.62 * sc, count: s.poops, t: t)
+            let k = max(0.35, 1 - m.oy * 3)
+            let sw = w0 * 0.95 * k
+            base.fill(Path(ellipseIn: CGRect(x: cx - sw / 2, y: ground - S * 0.025, width: sw, height: S * 0.05)),
+                      with: .radialGradient(Gradient(stops: [.init(color: .black.opacity(0.38 * k), location: 0),
+                                                             .init(color: .black.opacity(0), location: 1)]),
+                                            center: CGPoint(x: cx, y: ground), startRadius: 0, endRadius: sw / 2))
+            drawPoops(base, S: S, cx: cx0, ground: ground, w: w0, count: s.poops, t: t)
         }
 
         var c = base
         c.translateBy(x: cx, y: ground)
-        c.rotate(by: .radians(tilt))
+        c.rotate(by: .radians(m.tilt))
         c.translateBy(x: -cx, y: -ground)
+        if m.roll != 0 {
+            c.translateBy(x: cx, y: centerY)
+            c.rotate(by: .radians(m.roll))
+            c.translateBy(x: -cx, y: -centerY)
+        }
+
+        // Project a point on the body's front surface (fx, fy in -1…1, up = +) as if the body
+        // were a round 3D shape turned by yaw/pitch. Returns screen point, foreshortening, visibility.
+        func proj(_ fx: Double, _ fy: Double) -> (p: CGPoint, kx: Double, ky: Double, vis: Double) {
+            let th = asin(max(-0.99, min(0.99, fx))) + m.yaw
+            let ph = asin(max(-0.99, min(0.99, fy))) - m.pitch
+            let x = cx + sin(th) * cos(ph) * w / 2
+            let y = centerY - sin(ph) * h / 2
+            return (CGPoint(x: x, y: y), max(0.12, cos(th)), max(0.12, cos(ph)), cos(th) * cos(ph))
+        }
 
         // ---- Colours ----
-        let mintTop = RGB(r: 0.62, g: 0.92, b: 0.78), mintBottom = RGB(r: 0.33, g: 0.72, b: 0.58)
-        let sickTop = RGB(r: 0.84, g: 0.87, b: 0.58), sickBottom = RGB(r: 0.60, g: 0.66, b: 0.34)
+        let mintTop = RGB(r: 0.66, g: 0.95, b: 0.82), mintBottom = RGB(r: 0.27, g: 0.66, b: 0.53)
+        let sickTop = RGB(r: 0.86, g: 0.89, b: 0.6), sickBottom = RGB(r: 0.56, g: 0.62, b: 0.3)
         let k = s.sick ? 0.75 : 0.0
         let top = mintTop.mix(sickTop, k), bottom = mintBottom.mix(sickBottom, k)
-        let dark = bottom.mix(RGB(r: 0.1, g: 0.3, b: 0.25), 0.25)
+        let dark = bottom.mix(RGB(r: 0.08, g: 0.28, b: 0.22), 0.3)
+        let limbGrad = Gradient(colors: [top.mix(bottom, 0.55).color, dark.color])
 
         // ---- Arms (behind body) ----
-        var leftRaise = 0.35, rightRaise = 0.35
+        var leftRaise = 0.35 + m.arms, rightRaise = 0.35 + m.arms
         switch s.reaction {
         case .wave, .hatch: rightRaise = 2.3 + sin(a * 14) * 0.4
         case .bath: leftRaise = 2.5 + sin(a * 18) * 0.3; rightRaise = 2.5 - sin(a * 18) * 0.3
@@ -159,43 +172,76 @@ enum PetRenderer {
         if !s.mini {
             for (side, raise) in [(-1.0, leftRaise), (1.0, rightRaise)] {
                 var ac = c
-                ac.translateBy(x: cx + side * w * 0.40, y: baseY - h * 0.42)
+                // Arms slide around the body a little as it turns
+                ac.translateBy(x: cx + side * w * 0.40 + sin(m.yaw) * w * 0.07, y: baseY - h * 0.42)
                 ac.rotate(by: .radians(-side * raise))
                 let aw = w * 0.15, ah = w * 0.27
-                ac.fill(Path(ellipseIn: CGRect(x: -aw / 2, y: -aw * 0.2, width: aw, height: ah)), with: .color(dark.color))
+                let arm = Path(ellipseIn: CGRect(x: -aw / 2, y: -aw * 0.2, width: aw, height: ah))
+                ac.fill(arm, with: .linearGradient(limbGrad, startPoint: CGPoint(x: -aw / 2, y: 0),
+                                                   endPoint: CGPoint(x: aw / 2, y: ah)))
+                ac.fill(Path(ellipseIn: CGRect(x: -aw * 0.28, y: ah * 0.12, width: aw * 0.22, height: ah * 0.35)),
+                        with: .color(.white.opacity(0.25)))
             }
         }
 
-        // ---- Body ----
+        // ---- Glossy body ----
         let body = bodyPath(cx: cx, base: baseY, w: w, h: h)
+        // 1. Key light from the upper-left
         c.fill(body, with: .linearGradient(Gradient(colors: [top.color, bottom.color]),
-                                           startPoint: CGPoint(x: cx, y: baseY - h),
-                                           endPoint: CGPoint(x: cx, y: baseY)))
-        c.fill(Path(ellipseIn: CGRect(x: cx - w * 0.25, y: baseY - h * 0.46, width: w * 0.5, height: h * 0.40)),
-               with: .color(.white.opacity(0.26)))
+                                           startPoint: CGPoint(x: cx - w * 0.32, y: baseY - h),
+                                           endPoint: CGPoint(x: cx + w * 0.3, y: baseY)))
+        // 2. Warm bounce light glowing up from the ground (feels squishy / translucent)
+        c.fill(body, with: .radialGradient(Gradient(stops: [.init(color: top.color.opacity(0.45), location: 0),
+                                                            .init(color: top.color.opacity(0), location: 1)]),
+                                           center: CGPoint(x: cx + sin(m.yaw) * w * 0.1, y: baseY + h * 0.05),
+                                           startRadius: 0, endRadius: w * 0.42))
+        // 3. Tummy patch that turns with the body
+        let belly = proj(0, -0.38)
+        if belly.vis > 0 {
+            var bc = c
+            bc.clip(to: body)
+            let bw = w * 0.48 * belly.kx, bh = h * 0.38 * belly.ky
+            bc.fill(Path(ellipseIn: CGRect(x: belly.p.x - bw / 2, y: belly.p.y - bh / 2, width: bw, height: bh)),
+                    with: .radialGradient(Gradient(stops: [.init(color: .white.opacity(0.26), location: 0),
+                                                           .init(color: .white.opacity(0.14), location: 0.7),
+                                                           .init(color: .white.opacity(0), location: 1)]),
+                                          center: belly.p, startRadius: 0, endRadius: max(bw, bh) / 2))
+        }
+        // 4. Rim shadow: darkens the edges so it reads as round
+        c.fill(body, with: .radialGradient(Gradient(stops: [.init(color: .clear, location: 0),
+                                                            .init(color: .clear, location: 0.58),
+                                                            .init(color: dark.color.opacity(0.28), location: 0.85),
+                                                            .init(color: .black.opacity(0.3), location: 1)]),
+                                           center: CGPoint(x: cx - w * 0.08, y: centerY - h * 0.08),
+                                           startRadius: 0, endRadius: max(w, h) * 0.6))
 
-        // Dirt
+        // Dirt (moves with the body's turn)
         if s.hygiene < 45 && !s.mini {
             let o = (45 - s.hygiene) / 45 * 0.7
             let mud = Color(red: 0.45, green: 0.32, blue: 0.2).opacity(o)
-            for (px, py, r) in [(-0.2, 0.55, 0.09), (0.19, 0.38, 0.07), (0.06, 0.78, 0.08), (-0.05, 0.3, 0.05)] {
+            var dc = c
+            dc.clip(to: body)
+            for (px, py, r) in [(-0.4, -0.1, 0.09), (0.38, 0.24, 0.07), (0.12, -0.56, 0.08), (-0.1, 0.4, 0.05)] {
+                let q = proj(px, py)
+                guard q.vis > 0 else { continue }
                 let rr = w * r
-                c.fill(Path(ellipseIn: CGRect(x: cx + w * px - rr, y: baseY - h * (1 - py) - rr * 0.7,
-                                              width: rr * 2, height: rr * 1.4)), with: .color(mud))
+                dc.fill(Path(ellipseIn: CGRect(x: q.p.x - rr * q.kx, y: q.p.y - rr * 0.7,
+                                               width: rr * 2 * q.kx, height: rr * 1.4)), with: .color(mud))
             }
         }
 
         // Feet
-        let fw = w * 0.24, fh = S * 0.075 * sc
+        let fw = w0 * 0.24, fh = S * 0.075 * sc
         for side in [-1.0, 1.0] {
-            c.fill(Path(ellipseIn: CGRect(x: cx + side * w * 0.2 - fw / 2, y: baseY - fh * 0.62, width: fw, height: fh)),
-                   with: .color(dark.color))
+            let fx = cx + side * w * 0.2 + sin(m.yaw) * w * 0.05
+            let foot = Path(ellipseIn: CGRect(x: fx - fw / 2, y: baseY - fh * 0.62, width: fw, height: fh))
+            c.fill(foot, with: .linearGradient(limbGrad, startPoint: CGPoint(x: fx, y: baseY - fh * 0.62),
+                                               endPoint: CGPoint(x: fx, y: baseY + fh * 0.4)))
+            c.fill(Path(ellipseIn: CGRect(x: fx - fw * 0.28, y: baseY - fh * 0.5, width: fw * 0.3, height: fh * 0.22)),
+                   with: .color(.white.opacity(0.22)))
         }
 
-        // Sprout
-        drawSprout(c, S: S * sc, top: CGPoint(x: cx, y: baseY - h), t: t, s: s)
-
-        // ---- Face ----
+        // ---- Face (projected onto the round body so it turns in 3D) ----
         var eye: EyeStyle = .open
         var mouth: MouthStyle = .smile
         switch s.reaction {
@@ -221,26 +267,78 @@ enum PetRenderer {
                 case .happy: eye = .open; mouth = .bigSmile
                 default: eye = .open; mouth = .smile
                 }
+                if let idle = m.idleEye { eye = idle; if idle == .happy { mouth = .bigSmile } }
             }
         }
-        let blinking = (t + 0.7).truncatingRemainder(dividingBy: 4.3) < 0.13
-        if blinking && [EyeStyle.open, .surprised, .sad].contains(eye) { eye = .closed }
+        let openable: [EyeStyle] = [.open, .surprised, .sad, .sick, .annoyed]
+        if m.open < 0.35 && openable.contains(eye) { eye = .closed }
 
-        let eyeY = baseY - h * 0.64
+        var face = c
+        face.clip(to: body)
         let rx = S * 0.052 * sc, ry = S * 0.066 * sc
+        let eyeFy = 0.28
         let lidColor = top.mix(bottom, 0.3).color
+        let pupilLook = CGVector(dx: s.look.dx * 0.4, dy: s.look.dy * 0.4)
         for side in [-1.0, 1.0] {
-            let ex = cx + side * w * 0.19
-            drawEye(c, style: eye, x: ex, y: eyeY, rx: rx, ry: ry, inner: -side, look: s.look, t: t, lid: lidColor)
-            // Cheeks
-            if !s.sick && !s.mini {
-                let blush = s.reaction == .pat ? 0.7 : 0.18 + s.happiness / 100 * 0.3
-                c.fill(Path(ellipseIn: CGRect(x: ex + side * rx * 0.55 - rx * 0.75, y: eyeY + ry * 0.95,
-                                              width: rx * 1.5, height: ry * 0.6)),
-                       with: .color(Color(red: 1, green: 0.5, blue: 0.6).opacity(blush)))
+            let e = proj(side * 0.38, eyeFy)
+            guard e.vis > 0.05 else { continue }
+            var ec = face
+            ec.translateBy(x: e.p.x, y: e.p.y)
+            let lidScale = openable.contains(eye) ? max(0.3, m.open) : 1
+            ec.scaleBy(x: e.kx * m.es, y: e.ky * m.es * lidScale)
+            drawEye(ec, style: eye, x: 0, y: 0, rx: rx, ry: ry, inner: -side, look: pupilLook, t: t, lid: lidColor)
+            // Blush cheeks
+            if !s.sick {
+                let ch = proj(side * 0.5, eyeFy - (ry * 1.25) / (h / 2))
+                if ch.vis > 0.05 {
+                    let blush = s.reaction == .pat ? 0.75 : 0.22 + s.happiness / 100 * 0.3
+                    let cw = rx * 1.6 * ch.kx, chh = ry * 0.62 * ch.ky
+                    face.fill(Path(ellipseIn: CGRect(x: ch.p.x - cw / 2, y: ch.p.y - chh / 2, width: cw, height: chh)),
+                              with: .radialGradient(Gradient(stops: [
+                                    .init(color: Color(red: 1, green: 0.48, blue: 0.6).opacity(blush), location: 0),
+                                    .init(color: Color(red: 1, green: 0.48, blue: 0.6).opacity(0), location: 1)]),
+                                    center: ch.p, startRadius: 0, endRadius: cw / 2))
+                }
             }
         }
-        drawMouth(c, style: mouth, x: cx, y: eyeY + S * 0.1 * sc, mw: S * 0.08 * sc, a: a, t: t)
+        let mo = proj(0, eyeFy - (S * 0.1 * sc) / (h / 2))
+        if mo.vis > 0.05 {
+            var mc = face
+            mc.translateBy(x: mo.p.x, y: mo.p.y)
+            mc.scaleBy(x: mo.kx, y: mo.ky)
+            drawMouth(mc, style: mouth, x: 0, y: 0, mw: S * 0.08 * sc, a: a, t: t)
+        }
+        let eyeY = proj(0, eyeFy).p.y
+
+        // 5. Specular shine on top of everything (fixed light, so it stays put while the face turns)
+        c.fill(body, with: .radialGradient(Gradient(stops: [.init(color: .white.opacity(0.55), location: 0),
+                                                            .init(color: .white.opacity(0.12), location: 0.55),
+                                                            .init(color: .white.opacity(0), location: 1)]),
+                                           center: CGPoint(x: cx - w * 0.2, y: baseY - h * 0.78),
+                                           startRadius: 0, endRadius: w * 0.3))
+        var shine = c
+        shine.clip(to: body)
+        shine.translateBy(x: cx - w * 0.23, y: baseY - h * 0.8)
+        shine.rotate(by: .radians(-0.5))
+        shine.fill(Path(ellipseIn: CGRect(x: -w * 0.07, y: -h * 0.03, width: w * 0.14, height: h * 0.06)),
+                   with: .color(.white.opacity(0.7)))
+
+        // Sprout sits on top of the head and turns with it
+        let crown = proj(0, 0.97)
+        drawSprout(c, S: S * sc, top: CGPoint(x: crown.p.x, y: baseY - h + h * 0.005), t: t, s: s,
+                   lean: m.tilt + sin(m.yaw) * 0.25)
+
+        // Idle love hearts
+        if !s.mini {
+            let now = CACurrentMediaTime()
+            for hrt in m.hearts where now >= hrt.born {
+                let ph = (now - hrt.born) / 1.6
+                let x = cx + hrt.x * w + sin(ph * 7) * S * 0.02
+                let y = baseY - h - ph * S * 0.25
+                c.fill(heart(CGPoint(x: x, y: y), S * 0.075 * (1 - ph * 0.3)),
+                       with: .color(Color(red: 1, green: 0.42, blue: 0.55).opacity(1 - ph)))
+            }
+        }
 
         if s.mini {
             if s.asleep { drawZzz(base, S: S * 1.6, x: cx + S * 0.25, y: baseY - h, t: t) }
@@ -385,8 +483,8 @@ enum PetRenderer {
         return p
     }
 
-    static func drawSprout(_ c: GraphicsContext, S: Double, top: CGPoint, t: Double, s: PetSnapshot) {
-        let sway = sin(t * 1.6) * S * 0.02
+    static func drawSprout(_ c: GraphicsContext, S: Double, top: CGPoint, t: Double, s: PetSnapshot, lean: Double = 0) {
+        let sway = sin(t * 1.6) * S * 0.02 - lean * S * 0.12
         let stemLen = S * (s.mini ? 0.14 : 0.11)
         let tip = CGPoint(x: top.x + sway, y: top.y - stemLen)
         var stem = Path()
@@ -410,7 +508,16 @@ enum PetRenderer {
             lc.translateBy(x: tip.x, y: tip.y)
             let dir = ang < 1 ? 1.0 : -1.0
             lc.rotate(by: .radians(ang + flutter + droop * dir))
-            lc.fill(leaf(S * len), with: .color(leafColor))
+            let L = S * len
+            lc.fill(leaf(L), with: .linearGradient(Gradient(colors: [Color(red: 0.6, green: 0.92, blue: 0.5), leafColor,
+                                                                      Color(red: 0.25, green: 0.6, blue: 0.3)]),
+                                                     startPoint: CGPoint(x: 0, y: -L * 0.3), endPoint: CGPoint(x: L, y: L * 0.3)))
+            var vein = Path()
+            vein.move(to: CGPoint(x: L * 0.08, y: 0))
+            vein.addQuadCurve(to: CGPoint(x: L * 0.85, y: 0), control: CGPoint(x: L * 0.5, y: -L * 0.06))
+            lc.stroke(vein, with: .color(.white.opacity(0.35)), lineWidth: max(0.6, L * 0.05))
+            lc.fill(Path(ellipseIn: CGRect(x: L * 0.25, y: -L * 0.2, width: L * 0.25, height: L * 0.08)),
+                    with: .color(.white.opacity(0.35)))
         }
         if s.stage == .adult && !s.mini {
             let fc = CGPoint(x: tip.x, y: tip.y - S * 0.035)
@@ -484,6 +591,15 @@ enum PetRenderer {
         case .sick:
             openEye(scale: 0.9)
             lidOver(0.5)
+        case .wink:
+            if inner > 0 {
+                var p = Path()
+                p.move(to: CGPoint(x: x - rx, y: y + ry * 0.35))
+                p.addQuadCurve(to: CGPoint(x: x + rx, y: y + ry * 0.35), control: CGPoint(x: x, y: y - ry * 1.1))
+                c.stroke(p, with: .color(ink), style: strokeStyle)
+            } else {
+                openEye()
+            }
         }
     }
 
@@ -602,6 +718,16 @@ enum PetRenderer {
             c.fill(Path(ellipseIn: CGRect(x: cx + w * px - rr, y: ground - h * py - rr, width: rr * 2, height: rr * 2)),
                    with: .color(Color(red: 0.5, green: 0.85, blue: 0.68).opacity(0.8)))
         }
+        // Gloss: rim shadow + shine
+        c.fill(egg, with: .radialGradient(Gradient(stops: [.init(color: .clear, location: 0),
+                                                           .init(color: .clear, location: 0.6),
+                                                           .init(color: Color(red: 0.45, green: 0.35, blue: 0.2).opacity(0.3), location: 1)]),
+                                          center: CGPoint(x: cx - w * 0.06, y: ground - h * 0.55),
+                                          startRadius: 0, endRadius: h * 0.6))
+        c.fill(egg, with: .radialGradient(Gradient(stops: [.init(color: .white.opacity(0.75), location: 0),
+                                                           .init(color: .white.opacity(0), location: 1)]),
+                                          center: CGPoint(x: cx - w * 0.17, y: ground - h * 0.74),
+                                          startRadius: 0, endRadius: w * 0.3))
         if p > 0.5 {
             let k = min(1, (p - 0.5) / 0.4)
             var crack = Path()
