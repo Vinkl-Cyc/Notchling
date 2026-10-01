@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage(Pref.brain) private var brain = Brain.auto.rawValue
     @AppStorage(Pref.geminiModel) private var geminiModel = Pref.defaultGeminiModel
     @AppStorage(Pref.freeSearch) private var freeSearch = true
+    @AppStorage(Pref.petStyle) private var petStyle = "body"
 
     @State private var geminiDraft = ""
     @State private var claudeDraft = ""
@@ -98,6 +99,11 @@ struct SettingsView: View {
             }
 
             Section("Pet") {
+                Picker("Look", selection: $petStyle) {
+                    Text("Glossy body").tag("body")
+                    Text("Just a face").tag("face")
+                }
+                .pickerStyle(.segmented)
                 HStack {
                     TextField("Name", text: $nameDraft)
                         .onSubmit { pet.rename(nameDraft) }
@@ -122,6 +128,7 @@ struct SettingsView: View {
                             launchAtLogin = SMAppService.mainApp.status == .enabled
                         }
                     }
+                Button("Quit Notchling", role: .destructive) { NSApp.terminate(nil) }
             }
 
             Section {

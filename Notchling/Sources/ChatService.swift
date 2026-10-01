@@ -54,6 +54,7 @@ enum Pref {
     static let geminiModel = "geminiModel"
     static let maxSearches = "maxSearches"
     static let freeSearch = "freeSearch"
+    static let petStyle = "petStyle"
     static let soundOn = "soundOn"
     static let volume = "volume"
 
@@ -68,6 +69,7 @@ enum Pref {
             geminiModel: defaultGeminiModel,
             maxSearches: 3,
             freeSearch: true,
+            petStyle: "body",
             soundOn: true,
             volume: 0.35,
         ])

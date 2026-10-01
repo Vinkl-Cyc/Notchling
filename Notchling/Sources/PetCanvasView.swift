@@ -26,6 +26,7 @@ struct PetSnapshot {
     var look: CGVector
     var hatchProgress: Double
     var mini: Bool
+    var faceMode: Bool
 }
 
 struct PetCanvasView: View {
@@ -34,6 +35,7 @@ struct PetCanvasView: View {
     var mini: Bool = false
     var animate: Bool = true
     @State private var motion = PetMotion()
+    @AppStorage(Pref.petStyle) private var petStyle = "body"
 
     var body: some View {
         GeometryReader { geo in
@@ -69,7 +71,7 @@ struct PetCanvasView: View {
             hover: hover, emoji: pet.reactionEmoji,
             poops: p.poops, hygiene: p.hygiene, happiness: p.happiness, asleep: p.isAsleep,
             sick: pet.isSick, thinking: pet.isThinking, expectingFile: pet.expectingFile,
-            look: look, hatchProgress: min(1, max(0, hatch)), mini: mini)
+            look: look, hatchProgress: min(1, max(0, hatch)), mini: mini, faceMode: petStyle == "face")
     }
 }
 
@@ -99,6 +101,10 @@ enum PetRenderer {
         }
         if s.mood == .gone {
             drawNote(base, S: S, cx: cx0, ground: ground, t: t)
+            return
+        }
+        if s.faceMode {
+            drawFaceMode(base, S: S, cx0: cx0, ground: ground, t: t, s: s, m: m)
             return
         }
 
@@ -452,6 +458,299 @@ enum PetRenderer {
         }
     }
 
+    // MARK: - Face mode (just an expressive glowing face)
+
+    static func faceExpression(_ s: PetSnapshot, _ m: PetMotion) -> (EyeStyle, MouthStyle, hearts: Bool) {
+        var eye: EyeStyle = .open
+        var mouth: MouthStyle = .smile
+        var heartEyes = false
+        switch s.reaction {
+        case .dizzy: eye = .dizzy; mouth = .wavy
+        case .poke: eye = .annoyed; mouth = .frown
+        case .pat: heartEyes = true; mouth = .bigSmile
+        case .happy, .wave, .hatch: eye = .happy; mouth = .bigSmile
+        case .eat, .snack: eye = .happy; mouth = .chew
+        case .medicine: eye = .closed; mouth = .chew
+        case .bath: eye = .happy; mouth = .open
+        case .refuse: eye = .annoyed; mouth = .flat
+        case .sad: eye = .sad; mouth = .frown
+        case .yawn: eye = .closed; mouth = .yawn
+        case .none:
+            if s.asleep { eye = .closed; mouth = .flat }
+            else if s.thinking { eye = .open; mouth = .flat }
+            else if s.expectingFile { eye = .surprised; mouth = .open }
+            else {
+                switch s.mood {
+                case .sick: eye = .sick; mouth = .wavy
+                case .hungry, .sad: eye = .sad; mouth = .frown
+                case .dirty: eye = .sick; mouth = .flat
+                case .sleepy: eye = .sick; mouth = .flat
+                case .happy: eye = .open; mouth = .bigSmile
+                default: eye = .open; mouth = .smile
+                }
+                if let idle = m.idleEye { eye = idle; if idle == .happy { mouth = .bigSmile } }
+            }
+        }
+        if m.open < 0.3 && [EyeStyle.open, .surprised, .sad, .sick, .annoyed].contains(eye) { eye = .closed }
+        return (eye, mouth, heartEyes)
+    }
+
+    static func drawFaceMode(_ base: GraphicsContext, S: Double, cx0: Double, ground: Double, t: Double,
+                             s: PetSnapshot, m: PetMotion) {
+        let sc: Double
+        switch s.stage {
+        case .egg, .baby: sc = 0.82
+        case .kid: sc = 0.9
+        case .teen: sc = 0.96
+        case .adult: sc = 1.0
+        }
+        let k = s.mini ? 1.25 : sc
+        let a = s.reactionAge
+
+        // Colours: glowing mint, yellowish when sick, dimmer when asleep
+        let mint = RGB(r: 0.55, g: 1.0, b: 0.82)
+        let sickC = RGB(r: 0.95, g: 0.92, b: 0.5)
+        var eyeRGB = mint.mix(sickC, s.sick ? 0.8 : 0)
+        if s.asleep { eyeRGB = eyeRGB.mix(RGB(r: 0.3, g: 0.45, b: 0.45), 0.35) }
+        let eyeColor = eyeRGB.color
+        let pink = Color(red: 1, green: 0.5, blue: 0.66)
+
+        // Face position: slides toward where it's looking, hops, shuffles
+        let fcx = cx0 + m.ox * S + sin(m.yaw) * S * (s.mini ? 0.16 : 0.14)
+        let fcy = (s.mini ? ground - S * 0.5 : ground - S * 0.46) - m.oy * S + m.pitch * S * 0.14
+
+        if !s.mini {
+            drawPoops(base, S: S, cx: cx0, ground: ground, w: S * 0.62 * sc, count: s.poops, t: t)
+        }
+
+        var c = base
+        c.translateBy(x: fcx, y: fcy + S * 0.2)
+        c.rotate(by: .radians(m.tilt))
+        c.translateBy(x: -fcx, y: -(fcy + S * 0.2))
+        if m.roll != 0 {
+            c.translateBy(x: fcx, y: fcy)
+            c.rotate(by: .radians(m.roll))
+            c.translateBy(x: -fcx, y: -fcy)
+        }
+
+        let (eye, mouth, heartEyes) = faceExpression(s, m)
+        let ew = S * 0.13 * k * m.sx * m.es
+        let eh = S * 0.2 * k * m.sy * m.es
+        let spacing = S * 0.17 * k * (1 - abs(sin(m.yaw)) * 0.22)
+
+        var glow = c
+        glow.addFilter(.shadow(color: eyeColor.opacity(s.asleep ? 0.35 : 0.75), radius: S * (s.mini ? 0.05 : 0.035)))
+
+        // ---- Eyes ----
+        for side in [-1.0, 1.0] {
+            let persp = 1 + side * sin(m.yaw) * 0.14          // near eye a bit bigger as it turns
+            let ex = fcx + side * spacing
+            var g = glow
+            g.translateBy(x: ex, y: fcy)
+            g.scaleBy(x: persp, y: persp)
+            var lidCtx = c
+            lidCtx.translateBy(x: ex, y: fcy)
+            lidCtx.scaleBy(x: persp, y: persp)
+            if heartEyes {
+                let beat = 1 + sin(a * 12) * 0.08
+                g.fill(heart(.zero, ew * 1.35 * beat), with: .color(pink))
+            } else {
+                faceEye(g, lid: lidCtx, style: eye, w: ew, h: eh, open: m.open, side: side, t: t, color: eyeColor)
+            }
+        }
+
+        // ---- Cheeks ----
+        if !s.sick {
+            let blush = s.reaction == .pat ? 0.65 : 0.18 + s.happiness / 100 * 0.25
+            for side in [-1.0, 1.0] {
+                let p = CGPoint(x: fcx + side * spacing * 1.35, y: fcy + eh * 0.62)
+                let bw = ew * 1.15, bh = ew * 0.55
+                c.fill(Path(ellipseIn: CGRect(x: p.x - bw / 2, y: p.y - bh / 2, width: bw, height: bh)),
+                       with: .radialGradient(Gradient(stops: [.init(color: pink.opacity(blush), location: 0),
+                                                              .init(color: pink.opacity(0), location: 1)]),
+                                             center: p, startRadius: 0, endRadius: bw / 2))
+            }
+        }
+
+        // ---- Mouth ----
+        if !s.mini || mouth == .bigSmile || mouth == .open || mouth == .chew {
+            drawMouth(glow, style: mouth, x: fcx, y: fcy + eh * 0.72, mw: S * 0.07 * k, a: a, t: t, color: eyeColor)
+        }
+
+        // ---- Sprout antenna (Pip's signature) ----
+        drawSprout(c, S: S * (s.mini ? 0.75 : 0.85) * sc, top: CGPoint(x: fcx, y: fcy - eh * 0.62 - S * 0.03),
+                   t: t, s: s, lean: m.tilt + sin(m.yaw) * 0.3)
+
+        if s.mini {
+            if s.asleep { drawZzz(base, S: S * 1.6, x: fcx + S * 0.28, y: fcy - eh * 0.5, t: t) }
+            return
+        }
+
+        // ---- Overlays ----
+        let topY = fcy - eh * 0.8
+        let now = CACurrentMediaTime()
+        for hrt in m.hearts where now >= hrt.born {
+            let ph = (now - hrt.born) / 1.6
+            c.fill(heart(CGPoint(x: fcx + hrt.x * S * 0.5 + sin(ph * 7) * S * 0.02, y: topY - ph * S * 0.22),
+                         S * 0.07 * (1 - ph * 0.3)), with: .color(pink.opacity(1 - ph)))
+        }
+        switch s.reaction {
+        case .pat, .happy:
+            for i in 0..<3 {
+                let ph = (a * 0.9 + Double(i) / 3).truncatingRemainder(dividingBy: 1)
+                let x = fcx + (Double(i) - 1) * spacing * 1.4 + sin(ph * 6) * S * 0.03
+                c.fill(heart(CGPoint(x: x, y: topY - ph * S * 0.22), S * 0.075 * (1 - ph * 0.3)),
+                       with: .color(pink.opacity(1 - ph)))
+            }
+        case .eat, .snack, .medicine:
+            let dur = s.reaction == .eat ? 2.0 : 1.6
+            let left = max(0.15, 1 - a / dur)
+            c.draw(Text(s.emoji).font(.system(size: max(4, S * 0.18 * left))),
+                   at: CGPoint(x: fcx + spacing * 1.1, y: fcy + eh * 0.85))
+        case .bath:
+            for i in 0..<10 {
+                let ph = (a * 0.8 + Double(i) / 10).truncatingRemainder(dividingBy: 1)
+                let x = fcx + sin(Double(i) * 2.3) * S * 0.36 + sin(ph * 8 + Double(i)) * S * 0.02
+                let y = fcy + S * 0.3 - ph * S * 0.75
+                let r = S * (0.018 + Double(i % 3) * 0.011)
+                let rect = CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)
+                c.fill(Path(ellipseIn: rect), with: .color(.white.opacity(0.15 * (1 - ph))))
+                c.stroke(Path(ellipseIn: rect), with: .color(.white.opacity(0.8 * (1 - ph))), lineWidth: 1)
+            }
+        case .dizzy:
+            for i in 0..<3 {
+                let ang = t * 5 + Double(i) * 2.094
+                c.fill(star(CGPoint(x: fcx + cos(ang) * S * 0.3, y: topY + sin(ang) * S * 0.05), S * 0.04),
+                       with: .color(Color(red: 1, green: 0.85, blue: 0.3)))
+            }
+        case .hatch:
+            let o = max(0, 1 - max(0, a - 1.2) / 0.8)
+            for i in 0..<5 {
+                let ang = Double(i) * 1.2566 + 0.3
+                let d = S * (0.3 + a * 0.1)
+                c.fill(star(CGPoint(x: fcx + cos(ang) * d, y: fcy + sin(ang) * d * 0.6), S * 0.035 * o),
+                       with: .color(Color(red: 1, green: 0.9, blue: 0.4).opacity(o)))
+            }
+        default: break
+        }
+        if s.sick {
+            let dy = (t * 0.6).truncatingRemainder(dividingBy: 1)
+            let dx = fcx + spacing * 1.7, y0 = fcy - eh * 0.4 + dy * S * 0.06
+            var drop = Path()
+            drop.move(to: CGPoint(x: dx, y: y0 - S * 0.035))
+            drop.addQuadCurve(to: CGPoint(x: dx, y: y0 + S * 0.025), control: CGPoint(x: dx + S * 0.045, y: y0 + S * 0.02))
+            drop.addQuadCurve(to: CGPoint(x: dx, y: y0 - S * 0.035), control: CGPoint(x: dx - S * 0.045, y: y0 + S * 0.02))
+            c.fill(drop, with: .color(Color(red: 0.55, green: 0.8, blue: 1).opacity(0.9 - dy * 0.6)))
+        }
+        if s.hygiene < 45 {
+            // Little specks of dirt floating around the face, plus stink lines when really dirty
+            let o = (45 - s.hygiene) / 45 * 0.8
+            for (px, py) in [(-0.3, 0.12), (0.34, -0.05), (0.18, 0.2), (-0.22, -0.18)] {
+                let r = S * 0.012
+                c.fill(Path(ellipseIn: CGRect(x: fcx + px * S - r, y: fcy + py * S - r, width: r * 2, height: r * 2)),
+                       with: .color(Color(red: 0.6, green: 0.45, blue: 0.3).opacity(o)))
+            }
+            if s.hygiene < 20 {
+                for i in 0..<3 {
+                    let ph = (t * 0.5 + Double(i) / 3).truncatingRemainder(dividingBy: 1)
+                    let x0 = fcx + (Double(i) - 1) * S * 0.2
+                    var line = Path()
+                    for j in 0...8 {
+                        let yy = topY - Double(j) * S * 0.016 - ph * S * 0.08
+                        let xx = x0 + sin(Double(j) * 0.9 + t * 3) * S * 0.014
+                        if j == 0 { line.move(to: CGPoint(x: xx, y: yy)) } else { line.addLine(to: CGPoint(x: xx, y: yy)) }
+                    }
+                    c.stroke(line, with: .color(Color(red: 0.6, green: 0.7, blue: 0.4).opacity(0.7 * (1 - ph))), lineWidth: 1.5)
+                }
+            }
+        }
+        if s.asleep && s.reaction == .none {
+            drawZzz(base, S: S, x: fcx + spacing * 1.6, y: topY, t: t)
+        }
+        if s.thinking {
+            let bx = fcx + spacing * 1.9, by = topY
+            for i in 0..<3 {
+                let r = S * (0.016 + Double(i) * 0.009)
+                let on = Int(t * 3) % 3 == i
+                c.fill(Path(ellipseIn: CGRect(x: bx + Double(i) * S * 0.045 - r, y: by - Double(i) * S * 0.04 - r,
+                                              width: r * 2, height: r * 2)),
+                       with: .color(eyeColor.opacity(on ? 0.95 : 0.4)))
+            }
+            c.draw(Text("🔎").font(.system(size: S * 0.11)),
+                   at: CGPoint(x: bx + S * 0.12, y: by - S * 0.15 + sin(t * 4) * S * 0.01))
+        }
+    }
+
+    /// One glowing eye centred at (0,0). `lid` is an unglowed context for "eyelid" cut-outs
+    /// (drawn in black, which blends with the island's black background).
+    static func faceEye(_ g: GraphicsContext, lid: GraphicsContext, style: EyeStyle, w: Double, h: Double,
+                        open: Double, side: Double, t: Double, color: Color) {
+        let thick = StrokeStyle(lineWidth: max(1.5, w * 0.34), lineCap: .round, lineJoin: .round)
+        func pill(_ ww: Double, _ hh: Double) {
+            let r = min(ww, hh) / 2
+            g.fill(Path(roundedRect: CGRect(x: -ww / 2, y: -hh / 2, width: ww, height: hh), cornerRadius: r),
+                   with: .color(color))
+            // tiny inner sparkle
+            let sp = ww * 0.22
+            g.fill(Path(ellipseIn: CGRect(x: -ww * 0.22 - sp / 2, y: -hh * 0.28 - sp / 2, width: sp, height: sp)),
+                   with: .color(.white.opacity(0.75)))
+        }
+        func cutLid(innerY: Double, outerY: Double) {
+            let innerX = -side * w * 0.8, outerX = side * w * 0.8
+            var p = Path()
+            p.move(to: CGPoint(x: innerX, y: innerY))
+            p.addLine(to: CGPoint(x: outerX, y: outerY))
+            p.addLine(to: CGPoint(x: outerX, y: -h * 1.6))
+            p.addLine(to: CGPoint(x: innerX, y: -h * 1.6))
+            p.closeSubpath()
+            lid.fill(p, with: .color(.black))
+        }
+        let hh = h * max(0.08, min(1, open))
+        switch style {
+        case .open:
+            pill(w, hh)
+        case .surprised:
+            pill(w * 1.15, h * 1.08)
+        case .happy:
+            var p = Path()
+            p.move(to: CGPoint(x: -w * 0.55, y: h * 0.12))
+            p.addQuadCurve(to: CGPoint(x: w * 0.55, y: h * 0.12), control: CGPoint(x: 0, y: -h * 0.55))
+            g.stroke(p, with: .color(color), style: thick)
+        case .closed:
+            var p = Path()
+            p.move(to: CGPoint(x: -w * 0.55, y: 0))
+            p.addQuadCurve(to: CGPoint(x: w * 0.55, y: 0), control: CGPoint(x: 0, y: h * 0.3))
+            g.stroke(p, with: .color(color), style: StrokeStyle(lineWidth: max(1.5, w * 0.26), lineCap: .round))
+        case .sad:
+            pill(w, hh * 0.92)
+            cutLid(innerY: -h * 0.5, outerY: -h * 0.02)
+        case .annoyed:
+            pill(w, hh)
+            cutLid(innerY: -h * 0.02, outerY: -h * 0.42)
+        case .sick:
+            pill(w, hh * 0.9)
+            cutLid(innerY: -h * 0.08, outerY: -h * 0.08)
+        case .dizzy:
+            var p = Path()
+            for i in 0..<40 {
+                let ang = Double(i) * 0.45 + t * 8 * side
+                let r = w * 0.62 * Double(i) / 40
+                let pt = CGPoint(x: cos(ang) * r, y: sin(ang) * r * h / w * 0.8)
+                if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+            }
+            g.stroke(p, with: .color(color), style: StrokeStyle(lineWidth: max(1.2, w * 0.16), lineCap: .round))
+        case .wink:
+            if side < 0 {
+                var p = Path()
+                p.move(to: CGPoint(x: -w * 0.55, y: h * 0.12))
+                p.addQuadCurve(to: CGPoint(x: w * 0.55, y: h * 0.12), control: CGPoint(x: 0, y: -h * 0.55))
+                g.stroke(p, with: .color(color), style: thick)
+            } else {
+                pill(w, hh)
+            }
+        }
+    }
+
     // MARK: Parts
 
     static func bodyPath(cx: Double, base: Double, w: Double, h: Double) -> Path {
@@ -603,34 +902,34 @@ enum PetRenderer {
         }
     }
 
-    static func drawMouth(_ c: GraphicsContext, style: MouthStyle, x: Double, y: Double, mw: Double, a: Double, t: Double) {
+    static func drawMouth(_ c: GraphicsContext, style: MouthStyle, x: Double, y: Double, mw: Double, a: Double, t: Double, color: Color = ink) {
         let st = StrokeStyle(lineWidth: max(1.2, mw * 0.2), lineCap: .round, lineJoin: .round)
         switch style {
         case .smile:
             var p = Path()
             p.move(to: CGPoint(x: x - mw / 2, y: y))
             p.addQuadCurve(to: CGPoint(x: x + mw / 2, y: y), control: CGPoint(x: x, y: y + mw * 0.6))
-            c.stroke(p, with: .color(ink), style: st)
+            c.stroke(p, with: .color(color), style: st)
         case .bigSmile:
             var p = Path()
             p.move(to: CGPoint(x: x - mw * 0.6, y: y - mw * 0.05))
             p.addQuadCurve(to: CGPoint(x: x + mw * 0.6, y: y - mw * 0.05), control: CGPoint(x: x, y: y + mw * 1.25))
             p.closeSubpath()
-            c.fill(p, with: .color(ink))
+            c.fill(p, with: .color(color))
             c.fill(Path(ellipseIn: CGRect(x: x - mw * 0.25, y: y + mw * 0.22, width: mw * 0.5, height: mw * 0.28)),
                    with: .color(Color(red: 1, green: 0.45, blue: 0.5)))
         case .frown:
             var p = Path()
             p.move(to: CGPoint(x: x - mw / 2, y: y + mw * 0.35))
             p.addQuadCurve(to: CGPoint(x: x + mw / 2, y: y + mw * 0.35), control: CGPoint(x: x, y: y - mw * 0.2))
-            c.stroke(p, with: .color(ink), style: st)
+            c.stroke(p, with: .color(color), style: st)
         case .open:
             c.fill(Path(ellipseIn: CGRect(x: x - mw * 0.3, y: y - mw * 0.05, width: mw * 0.6, height: mw * 0.6)),
-                   with: .color(ink))
+                   with: .color(color))
         case .chew:
             let hh = mw * (0.12 + 0.45 * abs(sin(a * 14)))
             c.fill(Path(ellipseIn: CGRect(x: x - mw * 0.35, y: y + mw * 0.2 - hh / 2, width: mw * 0.7, height: hh)),
-                   with: .color(ink))
+                   with: .color(color))
         case .wavy:
             var p = Path()
             for i in 0...10 {
@@ -638,16 +937,16 @@ enum PetRenderer {
                 let py = y + mw * 0.2 + sin(Double(i) * 1.3 + t * 6) * mw * 0.12
                 if i == 0 { p.move(to: CGPoint(x: px, y: py)) } else { p.addLine(to: CGPoint(x: px, y: py)) }
             }
-            c.stroke(p, with: .color(ink), style: st)
+            c.stroke(p, with: .color(color), style: st)
         case .flat:
             var p = Path()
             p.move(to: CGPoint(x: x - mw * 0.3, y: y + mw * 0.2))
             p.addLine(to: CGPoint(x: x + mw * 0.3, y: y + mw * 0.2))
-            c.stroke(p, with: .color(ink), style: st)
+            c.stroke(p, with: .color(color), style: st)
         case .yawn:
             let k = sin(min(a, 1.4) / 1.4 * .pi)
             let hh = mw * (0.2 + k * 0.9)
-            c.fill(Path(ellipseIn: CGRect(x: x - mw * 0.35, y: y, width: mw * 0.7, height: hh)), with: .color(ink))
+            c.fill(Path(ellipseIn: CGRect(x: x - mw * 0.35, y: y, width: mw * 0.7, height: hh)), with: .color(color))
         }
     }
 
